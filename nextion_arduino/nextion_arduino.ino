@@ -5,14 +5,15 @@
 // ─────────────────────────────────────────────
 //  CONFIG — edit these
 // ─────────────────────────────────────────────
-const bool  isMock        = true;             // true = use mock sensor values
+const bool  isMock        = false;             // true = use mock sensor values
 
 const char* WIFI_SSID     = "jamhelmethub";
 const char* WIFI_PASSWORD = "123456789";
 
-const char* SERVER_HOST   = "your-server.com";
-const int   SERVER_PORT   = 80;
-const char* ENDPOINT      = "/api/sps30-results";
+// Remote config — fetched once at startup to discover core & sps30 hosts
+const char* CONFIG_HOST = "192.168.137.44";
+const int   CONFIG_PORT = 3000;
+const char* CONFIG_PATH = "/";
 
 // Must match Nextion timer: 50 steps × 500ms = 25 000ms
 // Arduino waits 25 500ms so Nextion navigates to page 3 first
@@ -20,8 +21,11 @@ const unsigned long PROCESS_DURATION_MS = 25500UL;
 const uint8_t       NEXTION_PWR_PIN     = 5;         // controls Nextion power (HIGH = on)
 // ─────────────────────────────────────────────
 
-WiFiClient wifiClient;
-HttpClient http(wifiClient, SERVER_HOST, SERVER_PORT);
+// Dynamic endpoints (populated from fetchConfig at startup)
+String coreHost  = "";
+int    corePort  = 80;
+String sps30Host = "";
+int    sps30Port = 80;
 
 // Stored readings
 float pm1_before, pm25_before, pm10_before;
@@ -40,6 +44,60 @@ unsigned long processStart = 0;
 // Nextion serial buffer
 uint8_t nxBuf[10];
 uint8_t nxIdx = 0;
+
+
+// ─────────────────────────────────────────────
+//  JSON / URL HELPERS
+// ─────────────────────────────────────────────
+
+// Extract the string value for a key from flat JSON like {"key":"value",...}
+String extractJsonString(const String& json, const String& key) {
+  String searchKey = "\"" + key + "\":\"";
+  int start = json.indexOf(searchKey);
+  if (start == -1) return "";
+  start += searchKey.length();
+  int end = json.indexOf('"', start);
+  if (end == -1) return "";
+  return json.substring(start, end);
+}
+
+// Extract a numeric float value for a key from flat JSON like {"key":1.23,...}
+float extractJsonFloat(const String& json, const String& key) {
+  String searchKey = "\"" + key + "\":";
+  int start = json.indexOf(searchKey);
+  if (start == -1) return 0.0f;
+  start += searchKey.length();
+  int end1 = json.indexOf(',', start);
+  int end2 = json.indexOf('}', start);
+  int end  = (end1 == -1) ? end2 : ((end2 == -1) ? end1 : min(end1, end2));
+  if (end == -1) return 0.0f;
+  return json.substring(start, end).toFloat();
+}
+
+// Parse "http://hostname[:port]" → host string + port int
+void parseUrl(const String& url, String& host, int& port) {
+  port = 80;
+  String s = url;
+  if (s.startsWith("https://")) {
+    s = s.substring(8);
+    port = 443;
+  }
+  else if (s.startsWith("http://")) {
+    s = s.substring(7);
+  }
+
+  // strip any trailing path (shouldn't be present but just in case)
+  int slashIdx = s.indexOf('/');
+  if (slashIdx != -1) s = s.substring(0, slashIdx);
+
+  int colonIdx = s.indexOf(':');
+  if (colonIdx != -1) {
+    host = s.substring(0, colonIdx);
+    port = s.substring(colonIdx + 1).toInt();
+  } else {
+    host = s;
+  }
+}
 
 
 // ─────────────────────────────────────────────
@@ -68,12 +126,146 @@ void connectWiFi() {
 
 
 // ─────────────────────────────────────────────
-//  HTTP POST
+//  CONFIG FETCH  (HTTPS → GitHub)
+// ─────────────────────────────────────────────
+bool fetchConfig() {
+  Serial.println("Fetching config...");
+
+  WiFiClient plainClient;
+  HttpClient configHttp(plainClient, CONFIG_HOST, CONFIG_PORT);
+
+  int err = configHttp.get(CONFIG_PATH);
+  if (err != 0) {
+    Serial.print("ERROR: config GET failed (err=");
+    Serial.print(err);
+    Serial.println(")");
+    return false;
+  }
+
+  int    statusCode = configHttp.responseStatusCode();
+  String body       = configHttp.responseBody();
+  configHttp.stop();
+
+  Serial.print("Config HTTP status: ");
+  Serial.println(statusCode);
+  Serial.println(body);
+
+  if (statusCode != 200) {
+    Serial.println("ERROR: unexpected config HTTP status");
+    return false;
+  }
+
+  String sps30Url = extractJsonString(body, "sps30");
+  String coreUrl  = extractJsonString(body, "core");
+
+  if (sps30Url.length() == 0 || coreUrl.length() == 0) {
+    Serial.println("ERROR: could not parse config JSON");
+    return false;
+  }
+
+  parseUrl(sps30Url, sps30Host, sps30Port);
+  parseUrl(coreUrl,  coreHost,  corePort);
+
+  Serial.print("SPS30 → "); Serial.print(sps30Host); Serial.print(":"); Serial.println(sps30Port);
+  Serial.print("Core  → "); Serial.print(coreHost);  Serial.print(":"); Serial.println(corePort);
+
+  return true;
+}
+
+
+// ─────────────────────────────────────────────
+//  CORE HTTP HELPER  (synchronous GET — blocks until response received)
+// ─────────────────────────────────────────────
+bool callCoreEndpoint(const String& path) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected — reconnecting...");
+    connectWiFi();
+  }
+  if (coreHost.length() == 0) {
+    Serial.println("ERROR: core host not set");
+    return false;
+  }
+
+  WiFiClient client;
+  HttpClient http(client, coreHost.c_str(), corePort);
+
+  Serial.print("→ core"); Serial.println(path);
+
+  int err = http.get(path);
+  if (err != 0) {
+    Serial.print("  ERROR: GET failed (err="); Serial.print(err); Serial.println(")");
+    http.stop();
+    return false;
+  }
+
+  int    statusCode = http.responseStatusCode();
+  String response   = http.responseBody();
+  http.stop();
+
+  Serial.print("  status: "); Serial.println(statusCode);
+  Serial.print("  body:   "); Serial.println(response);
+
+  return (statusCode >= 200 && statusCode < 300);
+}
+
+
+// ─────────────────────────────────────────────
+//  PROCESSING DEVICE CONTROL  (called on proceed from page 1)
+//  Each call blocks until the server responds before the next is issued.
+// ─────────────────────────────────────────────
+void activateProcessingDevices() {
+  Serial.println("=== Activating processing devices ===");
+
+  Serial.println("[1/3] UVC1 ON");
+  if (callCoreEndpoint("/uvc1/on")) {
+    Serial.println("  UVC1 ON — OK");
+  } else {
+    Serial.println("  UVC1 ON — FAILED (continuing)");
+  }
+
+  Serial.println("[2/3] UVC2 ON");
+  if (callCoreEndpoint("/uvc2/on")) {
+    Serial.println("  UVC2 ON — OK");
+  } else {
+    Serial.println("  UVC2 ON — FAILED (continuing)");
+  }
+
+  Serial.println("[3/5] Mist ON");
+  if (callCoreEndpoint("/mist/on")) {
+    Serial.println("  Mist ON — OK");
+  } else {
+    Serial.println("  Mist ON — FAILED (continuing)");
+  }
+
+  Serial.println("[4/5] Blower ON");
+  if (callCoreEndpoint("/blower/on")) {
+    Serial.println("  Blower ON — OK");
+  } else {
+    Serial.println("  Blower ON — FAILED (continuing)");
+  }
+
+  Serial.println("[5/5] Solenoid UNLOCK");
+  if (callCoreEndpoint("/solenoid/unlock")) {
+    Serial.println("  Solenoid UNLOCK — OK");
+  } else {
+    Serial.println("  Solenoid UNLOCK — FAILED (continuing)");
+  }
+
+  Serial.println("=== Processing devices activated ===");
+}
+
+
+// ─────────────────────────────────────────────
+//  HTTP POST results to core
 // ─────────────────────────────────────────────
 void postResults() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected — reconnecting...");
     connectWiFi();
+  }
+  if (coreHost.length() == 0) {
+    Serial.println("ERROR: core host not set — skipping post");
+    return;
   }
 
   String body = "{";
@@ -89,11 +281,14 @@ void postResults() {
   body += "}";
   body += "}";
 
-  Serial.println("Posting results...");
+  Serial.println("Posting results to core...");
   Serial.println(body);
 
+  WiFiClient client;
+  HttpClient http(client, coreHost.c_str(), corePort);
+
   http.beginRequest();
-  http.post(ENDPOINT);
+  http.post("/api/sps30-results");
   http.sendHeader("Content-Type", "application/json");
   http.sendHeader("Content-Length", body.length());
   http.endRequest();
@@ -101,6 +296,8 @@ void postResults() {
 
   int    statusCode = http.responseStatusCode();
   String response   = http.responseBody();
+  http.stop();
+
   Serial.print("Server response: ");
   Serial.println(statusCode);
   Serial.println(response);
@@ -125,7 +322,8 @@ void setLabel(const String& component, float value) {
 
 
 // ─────────────────────────────────────────────
-//  SPS30 / MOCK READER
+//  SPS30 READER  (mock or HTTP GET to {sps30Host}/data)
+//  Expected real response: {"pm1":X.XX,"pm25":X.XX,"pm10":X.XX}
 // ─────────────────────────────────────────────
 bool readSPS30(float &pm1, float &pm25, float &pm10) {
   if (isMock) {
@@ -136,14 +334,45 @@ bool readSPS30(float &pm1, float &pm25, float &pm10) {
     return true;
   }
 
-  // Real sensor path — add your library calls here when ready
-  pm1 = pm25 = pm10 = 0.0;
-  return false;
+  // Real path — HTTP GET to {sps30Host}/data
+  if (sps30Host.length() == 0) {
+    Serial.println("ERROR: sps30 host not set");
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) connectWiFi();
+
+  WiFiClient client;
+  HttpClient http(client, sps30Host.c_str(), sps30Port);
+
+  int err = http.get("/data");
+  if (err != 0) {
+    Serial.print("ERROR: SPS30 GET failed (err="); Serial.print(err); Serial.println(")");
+    http.stop();
+    return false;
+  }
+
+  int    statusCode = http.responseStatusCode();
+  String body       = http.responseBody();
+  http.stop();
+
+  if (statusCode != 200) {
+    Serial.print("ERROR: SPS30 HTTP status: "); Serial.println(statusCode);
+    return false;
+  }
+
+  Serial.println("SPS30 data: " + body);
+
+  pm1  = extractJsonFloat(body, "mc1p0");
+  pm25 = extractJsonFloat(body, "mc2p5");
+  pm10 = extractJsonFloat(body, "mc10p0");
+
+  return true;
 }
 
 
 // ─────────────────────────────────────────────
-//  REMOVE HELMET (shared by printh signal + auto-timer via printh)
+//  REMOVE HELMET
 // ─────────────────────────────────────────────
 void nextionPowerCycle() {
   Serial.println("Nextion: powering off...");
@@ -159,19 +388,60 @@ void nextionPowerCycle() {
 }
 
 void flushNextionBuffer() {
-  // Discard any bytes still in the Serial1 hardware buffer
   while (Serial1.available()) Serial1.read();
-  // Reset the parse buffer so the next printh is read cleanly
   nxIdx = 0;
   memset(nxBuf, 0, sizeof(nxBuf));
   Serial.println("Nextion buffer flushed.");
 }
 
+void deactivateProcessingDevices() {
+  Serial.println("=== Deactivating processing devices ===");
+
+  Serial.println("[1/5] UVC1 OFF");
+  if (callCoreEndpoint("/uvc1/off")) {
+    Serial.println("  UVC1 OFF — OK");
+  } else {
+    Serial.println("  UVC1 OFF — FAILED (continuing)");
+  }
+
+  Serial.println("[2/5] UVC2 OFF");
+  if (callCoreEndpoint("/uvc2/off")) {
+    Serial.println("  UVC2 OFF — OK");
+  } else {
+    Serial.println("  UVC2 OFF — FAILED (continuing)");
+  }
+
+  Serial.println("[3/5] Mist OFF");
+  if (callCoreEndpoint("/mist/off")) {
+    Serial.println("  Mist OFF — OK");
+  } else {
+    Serial.println("  Mist OFF — FAILED (continuing)");
+  }
+
+  Serial.println("[4/5] Blower OFF");
+  if (callCoreEndpoint("/blower/off")) {
+    Serial.println("  Blower OFF — OK");
+  } else {
+    Serial.println("  Blower OFF — FAILED (continuing)");
+  }
+
+  Serial.println("[5/5] Solenoid LOCK");
+  if (callCoreEndpoint("/solenoid/lock")) {
+    Serial.println("  Solenoid LOCK — OK");
+  } else {
+    Serial.println("  Solenoid LOCK — FAILED (continuing)");
+  }
+
+  Serial.println("=== Processing devices deactivated ===");
+}
+
 void doRemoveHelmet() {
-  Serial.println("Removing helmet — posting results...");
+  Serial.println("Removing helmet — deactivating devices & posting results...");
 
   // Trigger relay/servo here if needed
   // e.g. digitalWrite(HELMET_PIN, HIGH);
+
+  deactivateProcessingDevices();   // UVC1 off → UVC2 off → Mist off → Blower off → Solenoid lock
 
   postResults();
 
@@ -206,7 +476,6 @@ void handlePage1Start() {
     Serial.print("  pm25: ");        Serial.print(pm25_before);
     Serial.print("  pm10: ");        Serial.println(pm10_before);
 
-    // Page 1 is already fully loaded by now, labels will display
     setLabel("t0", pm1_before);
     setLabel("t1", pm25_before);
     setLabel("t2", pm10_before);
@@ -219,10 +488,16 @@ void handlePage1Start() {
 }
 
 // Called when Page 2 Preinitialize sends: printh 50 32 53 54
+// This fires right after the user presses PROCEED on page 1.
+// UVC1 → UVC2 → Mist are turned on synchronously before arming the timer.
 void handlePage2Start() {
-  Serial.println("Page 2 loaded — process timer armed.");
+  Serial.println("Page 2 loaded — proceed pressed on page 1.");
+
+  activateProcessingDevices();   // synchronous: UVC1 on, then UVC2 on, then Mist on
+
+  Serial.println("Process timer armed.");
   currentState     = PROCESSING;
-  processTriggered = false;  // let loop() arm the millis() timer fresh
+  processTriggered = false;      // loop() will arm the millis() timer
 }
 
 void handleButtonPress(uint8_t page, uint8_t compID) {
@@ -231,9 +506,7 @@ void handleButtonPress(uint8_t page, uint8_t compID) {
   Serial.print("  compID: ");
   Serial.println(compID);
 
-  // Page 0 / Page 1 touch events are fallbacks only.
-  // Primary triggers are the printh signals from Preinitialize events.
-  // (handlePage1Start and handlePage2Start are the reliable path)
+  // Primary triggers are printh signals from Preinitialize events.
   Serial.println("Touch fallback — no action taken (printh is primary).");
 }
 
@@ -338,6 +611,13 @@ void setup() {
 
   connectWiFi();
 
+  // Fetch dynamic core + sps30 endpoints from remote config
+  if (!fetchConfig()) {
+    Serial.println("WARN: config fetch failed — falling back to hardcoded hosts");
+    coreHost  = "192.168.137.180";  corePort  = 80;
+    sps30Host = "192.168.137.1";    sps30Port = 80;
+  }
+
   // Pre-fill mock values so PRINT/REMOVE HELMET always have data during testing
   if (isMock) {
     pm1_before  = 5.25;  pm25_before = 12.80; pm10_before = 18.40;
@@ -352,14 +632,14 @@ void setup() {
 void loop() {
   checkNextion();
 
-  // ── Arm process timer when PROCEED fires ───────────────────────────
+  // ── Arm process timer once PROCESSING state is entered ────────────────
   if (currentState == PROCESSING && !processTriggered) {
     processStart     = millis();
     processTriggered = true;
     Serial.println("Process countdown: 25.5s...");
   }
 
-  // ── After PROCESS_DURATION_MS: read after, push to page 3 ──────────
+  // ── After PROCESS_DURATION_MS: read after values, push to page 3 ──────
   // We wait 25 500ms (Nextion's timer finishes at 25 000ms and navigates
   // to page 3 first; our extra 500ms ensures it's there before we write).
   if (currentState == PROCESSING
@@ -378,6 +658,8 @@ void loop() {
       setLabel("t0", pm1_before);
       setLabel("t1", pm25_before);
       setLabel("t2", pm10_before);
+
+      delay(10000);
       setLabel("t3", pm1_after);
       setLabel("t4", pm25_after);
       setLabel("t5", pm10_after);
@@ -393,7 +675,7 @@ void loop() {
     }
   }
 
-  // ── Reset flags when back to IDLE ──────────────────────────────────
+  // ── Reset flags when back to IDLE ─────────────────────────────────────
   if (currentState == IDLE) {
     afterReadDone    = false;
     processTriggered = false;
