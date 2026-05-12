@@ -11,7 +11,7 @@ const char* WIFI_SSID     = "jamhelmethub";
 const char* WIFI_PASSWORD = "123456789";
 
 // Remote config — fetched once at startup to discover core & sps30 hosts
-const char* CONFIG_HOST = "192.168.137.44";
+const char* CONFIG_HOST = "192.168.137.1";
 const int   CONFIG_PORT = 3000;
 const char* CONFIG_PATH = "/";
 
