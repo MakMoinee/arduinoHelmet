@@ -66,6 +66,7 @@ router.get('/print', function(req, res, next) {
       border-radius: 3px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.18);
       font-size: 15px;        /* scales down to ~7.5px on label */
+      font-weight: bold;
       line-height: 1.55;
     }
 
@@ -148,14 +149,14 @@ router.get('/print', function(req, res, next) {
     <div class="timestamp">${dateStr} &nbsp; ${timeStr}</div>
     <div class="divider"></div>
     <div class="section-label">&#9650; BEFORE</div>
-    <div class="row"><span>PM1.0</span><span>${pm1b} ug/m&sup3;</span></div>
-    <div class="row"><span>PM2.5</span><span>${pm25b} ug/m&sup3;</span></div>
-    <div class="row"><span>PM10 </span><span>${pm10b} ug/m&sup3;</span></div>
-    <div class="divider"></div>
-    <div class="section-label">&#9660; AFTER</div>
     <div class="row"><span>PM1.0</span><span>${pm1a} ug/m&sup3;</span></div>
     <div class="row"><span>PM2.5</span><span>${pm25a} ug/m&sup3;</span></div>
     <div class="row"><span>PM10 </span><span>${pm10a} ug/m&sup3;</span></div>
+    <div class="divider"></div>
+    <div class="section-label">&#9660; AFTER</div>
+    <div class="row"><span>PM1.0</span><span>${pm1b} ug/m&sup3;</span></div>
+    <div class="row"><span>PM2.5</span><span>${pm25b} ug/m&sup3;</span></div>
+    <div class="row"><span>PM10 </span><span>${pm10b} ug/m&sup3;</span></div>
     <div class="divider"></div>
   </div>
   <button class="print-btn" onclick="window.print()">Print</button>
