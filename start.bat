@@ -1,0 +1,1 @@
+cd configServer && nodemon

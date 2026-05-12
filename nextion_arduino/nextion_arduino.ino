@@ -17,7 +17,9 @@ const char* CONFIG_PATH = "/";
 
 // Must match Nextion timer: 50 steps × 500ms = 25 000ms
 // Arduino waits 25 500ms so Nextion navigates to page 3 first
-const unsigned long PROCESS_DURATION_MS = 25500UL;
+const unsigned long PROCESS_DURATION_MS    = 25500UL;
+const unsigned long DEACTIVATION_WAIT_MS   = 120000UL;  // 2 min — run UVC/mist/blower
+const unsigned long SETTLE_WAIT_MS         = 120000UL;   // 2 min — let mist clear before reading
 const uint8_t       NEXTION_PWR_PIN     = 5;         // controls Nextion power (HIGH = on)
 // ─────────────────────────────────────────────
 
@@ -32,14 +34,16 @@ float pm1_before, pm25_before, pm10_before;
 float pm1_after,  pm25_after,  pm10_after;
 
 // State machine
-enum State { IDLE, SHOWING_BEFORE, PROCESSING, SHOWING_AFTER };
+enum State { IDLE, SHOWING_BEFORE, PROCESSING, DEACTIVATING, SETTLING, SHOWING_AFTER };
 State currentState = IDLE;
 
 // Flags & timers
 bool systemReady      = false;
 bool processTriggered = false;
 bool afterReadDone    = false;
-unsigned long processStart = 0;
+unsigned long processStart    = 0;
+unsigned long deactivateStart = 0;
+unsigned long settleStart     = 0;
 
 // Nextion serial buffer
 uint8_t nxBuf[10];
@@ -394,54 +398,54 @@ void flushNextionBuffer() {
   Serial.println("Nextion buffer flushed.");
 }
 
+// Turns off UVC1, UVC2, mist, blower only.
+// Solenoid is handled separately by doRemoveHelmet().
 void deactivateProcessingDevices() {
   Serial.println("=== Deactivating processing devices ===");
 
-  Serial.println("[1/5] UVC1 OFF");
+  Serial.println("[1/4] UVC1 OFF");
   if (callCoreEndpoint("/uvc1/off")) {
     Serial.println("  UVC1 OFF — OK");
   } else {
     Serial.println("  UVC1 OFF — FAILED (continuing)");
   }
 
-  Serial.println("[2/5] UVC2 OFF");
+  Serial.println("[2/4] UVC2 OFF");
   if (callCoreEndpoint("/uvc2/off")) {
     Serial.println("  UVC2 OFF — OK");
   } else {
     Serial.println("  UVC2 OFF — FAILED (continuing)");
   }
 
-  Serial.println("[3/5] Mist OFF");
+  Serial.println("[3/4] Mist OFF");
   if (callCoreEndpoint("/mist/off")) {
     Serial.println("  Mist OFF — OK");
   } else {
     Serial.println("  Mist OFF — FAILED (continuing)");
   }
 
-  Serial.println("[4/5] Blower OFF");
+  Serial.println("[4/4] Blower OFF");
   if (callCoreEndpoint("/blower/off")) {
     Serial.println("  Blower OFF — OK");
   } else {
     Serial.println("  Blower OFF — FAILED (continuing)");
   }
 
-  Serial.println("[5/5] Solenoid LOCK");
+  Serial.println("=== Processing devices deactivated ===");
+}
+
+void doRemoveHelmet() {
+  Serial.println("Removing helmet — locking solenoid & posting results...");
+
+  // Trigger relay/servo here if needed
+  // e.g. digitalWrite(HELMET_PIN, HIGH);
+
+  Serial.println("Solenoid LOCK");
   if (callCoreEndpoint("/solenoid/lock")) {
     Serial.println("  Solenoid LOCK — OK");
   } else {
     Serial.println("  Solenoid LOCK — FAILED (continuing)");
   }
-
-  Serial.println("=== Processing devices deactivated ===");
-}
-
-void doRemoveHelmet() {
-  Serial.println("Removing helmet — deactivating devices & posting results...");
-
-  // Trigger relay/servo here if needed
-  // e.g. digitalWrite(HELMET_PIN, HIGH);
-
-  deactivateProcessingDevices();   // UVC1 off → UVC2 off → Mist off → Blower off → Solenoid lock
 
   postResults();
 
@@ -458,8 +462,23 @@ void doRemoveHelmet() {
 //  NEXTION BUTTON HANDLERS
 // ─────────────────────────────────────────────
 void handlePrint() {
-  Serial.println("PRINT pressed — posting results...");
-  postResults();
+  Serial.println("PRINT pressed — sending results via query string...");
+
+  String path = "/print";
+  path += "?pm1_before="  + String(pm1_before,  2);
+  path += "&pm25_before=" + String(pm25_before, 2);
+  path += "&pm10_before=" + String(pm10_before, 2);
+  path += "&pm1_after="   + String(pm1_after,   2);
+  path += "&pm25_after="  + String(pm25_after,  2);
+  path += "&pm10_after="  + String(pm10_after,  2);
+
+  Serial.println("Request: " + path);
+
+  if (callCoreEndpoint(path)) {
+    Serial.println("PRINT — OK");
+  } else {
+    Serial.println("PRINT — FAILED");
+  }
 }
 
 void handleRemoveHelmet() {
@@ -632,22 +651,43 @@ void setup() {
 void loop() {
   checkNextion();
 
-  // ── Arm process timer once PROCESSING state is entered ────────────────
+  // ── Phase 1: Arm process timer when PROCESSING state is entered ────────
   if (currentState == PROCESSING && !processTriggered) {
     processStart     = millis();
     processTriggered = true;
-    Serial.println("Process countdown: 25.5s...");
+    Serial.println("Progress bar countdown: 25.5s...");
   }
 
-  // ── After PROCESS_DURATION_MS: read after values, push to page 3 ──────
-  // We wait 25 500ms (Nextion's timer finishes at 25 000ms and navigates
-  // to page 3 first; our extra 500ms ensures it's there before we write).
+  // ── Phase 2: Progress bar done → enter DEACTIVATING (2-min wait) ───────
+  // Nextion's timer finishes at 25 000ms and navigates to page 3 first;
+  // the extra 500ms ensures it's there before we do anything further.
   if (currentState == PROCESSING
       && processTriggered
-      && !afterReadDone
       && millis() - processStart >= PROCESS_DURATION_MS) {
 
-    Serial.println("Process done — reading after values...");
+    Serial.println("Progress bar done — waiting 2 min before deactivating devices...");
+    deactivateStart  = millis();
+    processTriggered = false;
+    currentState     = DEACTIVATING;
+  }
+
+  // ── Phase 3: After 2 min → deactivate UVC1/UVC2/mist/blower, start settle
+  if (currentState == DEACTIVATING
+      && millis() - deactivateStart >= DEACTIVATION_WAIT_MS) {
+
+    Serial.println("2 min elapsed — deactivating UVC1, UVC2, mist, blower...");
+    deactivateProcessingDevices();
+
+    Serial.println("Settling for 1 min before SPS30 read...");
+    settleStart  = millis();
+    currentState = SETTLING;
+  }
+
+  // ── Phase 4: After 1 min settle → read SPS30 and push results to page 3 ─
+  if (currentState == SETTLING
+      && millis() - settleStart >= SETTLE_WAIT_MS) {
+
+    Serial.println("Settle done — reading after values...");
 
     if (readSPS30(pm1_after, pm25_after, pm10_after)) {
       Serial.print("After → pm1: ");  Serial.print(pm1_after);
@@ -655,23 +695,22 @@ void loop() {
       Serial.print("  pm10: ");       Serial.println(pm10_after);
 
       // Push all six values to page 3
-      setLabel("t0", pm1_before);
-      setLabel("t1", pm25_before);
-      setLabel("t2", pm10_before);
-
-      delay(10000);
+      
       setLabel("t3", pm1_after);
       setLabel("t4", pm25_after);
       setLabel("t5", pm10_after);
+      
+      setLabel("t3", pm1_before);
+      setLabel("t4", pm25_before);
+      setLabel("t5", pm10_before);
 
       // Show PRINT and REMOVE HELMET now that data is ready
       sendToNextion("vis b0,1");
       sendToNextion("vis b1,1");
       Serial.println("All labels sent to page 3 — buttons visible.");
 
-      afterReadDone    = true;
-      processTriggered = false;
-      currentState     = SHOWING_AFTER;
+      afterReadDone = true;
+      currentState  = SHOWING_AFTER;
     }
   }
 
