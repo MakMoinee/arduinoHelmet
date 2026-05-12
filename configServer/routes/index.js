@@ -121,6 +121,7 @@ router.get('/print', function(req, res, next) {
   });
 
   var link = 'http://' + req.headers.host + '/receipt/' + id;
+  console.log('Generated receipt link:', link);
   res.json({ success: true, url: link, expires_in: '10 minutes' });
 });
 
