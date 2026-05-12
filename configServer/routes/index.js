@@ -1,6 +1,9 @@
 var express = require('express');
 var router = express.Router();
 var { exec } = require('child_process');
+var fs = require('fs');
+var path = require('path');
+var os = require('os');
 
 /* GET home page. */
 router.get('/', function(req, res, next) {
@@ -44,12 +47,14 @@ router.get('/print', function(req, res, next) {
     ''
   ].join('\n');
 
-  // Escape single quotes for PowerShell
-  var escaped = lines.replace(/'/g, "''");
+  // Write content to a temp file then print it (avoids multiline escaping issues)
+  var tmpFile = path.join(os.tmpdir(), 'print_' + Date.now() + '.txt');
+  fs.writeFileSync(tmpFile, lines, 'utf8');
 
-  var psCmd = "powershell.exe -Command \"'" + escaped + "' | Out-Printer -Name 'PT-210'\"";
+  var psCmd = 'powershell.exe -Command "Get-Content \'' + tmpFile.replace(/\\/g, '\\\\') + '\' | Out-Printer -Name \'PT-210\'"';
 
   exec(psCmd, function(err, stdout, stderr) {
+    fs.unlink(tmpFile, function(){});  // clean up temp file regardless
     if (err) {
       console.error('Print error:', stderr || err.message);
       return res.status(500).json({ error: 'Print failed', detail: stderr || err.message });
