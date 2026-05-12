@@ -462,7 +462,12 @@ void doRemoveHelmet() {
 //  NEXTION BUTTON HANDLERS
 // ─────────────────────────────────────────────
 void handlePrint() {
-  Serial.println("PRINT pressed — sending results via query string...");
+  Serial.println("PRINT pressed — sending results to config server...");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected — reconnecting...");
+    connectWiFi();
+  }
 
   String path = "/print";
   path += "?pm1_before="  + String(pm1_before,  2);
@@ -474,11 +479,22 @@ void handlePrint() {
 
   Serial.println("Request: " + path);
 
-  if (callCoreEndpoint(path)) {
-    Serial.println("PRINT — OK");
-  } else {
-    Serial.println("PRINT — FAILED");
+  WiFiClient client;
+  HttpClient http(client, CONFIG_HOST, CONFIG_PORT);
+
+  int err = http.get(path);
+  if (err != 0) {
+    Serial.print("PRINT — GET failed (err="); Serial.print(err); Serial.println(")");
+    http.stop();
+    return;
   }
+
+  int    statusCode = http.responseStatusCode();
+  String response   = http.responseBody();
+  http.stop();
+
+  Serial.print("PRINT — status: "); Serial.println(statusCode);
+  Serial.print("PRINT — body:   "); Serial.println(response);
 }
 
 void handleRemoveHelmet() {
@@ -525,7 +541,23 @@ void handleButtonPress(uint8_t page, uint8_t compID) {
   Serial.print("  compID: ");
   Serial.println(compID);
 
-  // Primary triggers are printh signals from Preinitialize events.
+  // Page 3: results screen — PRINT (b0) and REMOVE HELMET (b1)
+  // Nextion assigns compIDs in order of component creation.
+  // If your buttons don't respond, check the compID logged above
+  // and update the values below to match.
+  if (page == 3) {
+    if (compID == 1) {          // b0 = PRINT button
+      handlePrint();
+    } else if (compID == 2) {   // b1 = REMOVE HELMET button
+      handleRemoveHelmet();
+    } else {
+      Serial.print("Page 3 unknown compID: ");
+      Serial.println(compID);
+    }
+    return;
+  }
+
+  // Other pages — printh signals are the primary path
   Serial.println("Touch fallback — no action taken (printh is primary).");
 }
 
@@ -696,9 +728,9 @@ void loop() {
 
       // Push all six values to page 3
       
-      setLabel("t3", pm1_after);
-      setLabel("t4", pm25_after);
-      setLabel("t5", pm10_after);
+      setLabel("t0", pm1_after);
+      setLabel("t1", pm25_after);
+      setLabel("t2", pm10_after);
       
       setLabel("t3", pm1_before);
       setLabel("t4", pm25_before);

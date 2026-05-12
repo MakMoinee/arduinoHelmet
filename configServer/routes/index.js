@@ -40,42 +40,74 @@ router.get('/print', function(req, res, next) {
   <meta charset="UTF-8">
   <title>Air Quality Results</title>
   <style>
+    /* --- Page setup: 48mm x 210mm @ 203 DPI thermal label --- */
+    @page {
+      size: 48mm 210mm;
+      margin: 2mm 1.5mm;
+    }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    /* Screen preview: center a scaled receipt card */
     body {
       font-family: 'Courier New', monospace;
-      background: #f0f0f0;
+      background: #e8e8e8;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 30px 10px;
+      padding: 24px 10px;
     }
+
+    /* 48mm at 96 dpi screen ≈ 181px; scale up 2x for readability */
     .receipt {
       background: #fff;
-      width: 300px;
-      padding: 20px 16px;
-      border-radius: 4px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-      font-size: 13px;
-      line-height: 1.6;
+      width: 362px;           /* 181px × 2 screen preview */
+      padding: 16px 14px;
+      border-radius: 3px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+      font-size: 15px;        /* scales down to ~7.5px on label */
+      line-height: 1.55;
     }
+
     .title {
       text-align: center;
       font-weight: bold;
-      font-size: 14px;
-      margin-bottom: 4px;
+      font-size: 16px;
+      letter-spacing: 0.5px;
+      margin-bottom: 3px;
     }
-    .divider { border-top: 1px dashed #555; margin: 8px 0; }
+    .subtitle {
+      text-align: center;
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+    .timestamp {
+      text-align: center;
+      font-size: 12px;
+      color: #444;
+      margin-bottom: 3px;
+    }
+    .divider {
+      border: none;
+      border-top: 1px dashed #555;
+      margin: 6px 0;
+    }
     .section-label {
       text-align: center;
       font-weight: bold;
-      margin: 4px 0;
+      font-size: 13px;
+      margin: 3px 0 2px;
+      letter-spacing: 0.5px;
     }
-    .row { display: flex; justify-content: space-between; }
-    .timestamp { text-align: center; font-size: 11px; color: #555; margin-bottom: 4px; }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+    }
     .print-btn {
-      margin-top: 24px;
-      padding: 10px 30px;
-      font-size: 15px;
+      margin-top: 20px;
+      padding: 9px 28px;
+      font-size: 14px;
       background: #333;
       color: #fff;
       border: none;
@@ -83,27 +115,47 @@ router.get('/print', function(req, res, next) {
       cursor: pointer;
     }
     .print-btn:hover { background: #000; }
+
+    /* --- Print styles: render at true 48mm width --- */
     @media print {
-      body { background: #fff; padding: 0; }
-      .receipt { box-shadow: none; }
-      .print-btn { display: none; }
+      body {
+        background: #fff;
+        padding: 0;
+        display: block;
+      }
+      .receipt {
+        width: 45mm;          /* 48mm page - 1.5mm margins each side */
+        padding: 0;
+        border-radius: 0;
+        box-shadow: none;
+        font-size: 7.5pt;     /* ~8px at 203 DPI — readable on thermal */
+        line-height: 1.4;
+      }
+      .title      { font-size: 8.5pt; }
+      .subtitle,
+      .timestamp  { font-size: 7pt; }
+      .section-label { font-size: 7.5pt; }
+      .row        { font-size: 7pt; }
+      .divider    { margin: 3px 0; }
+      .print-btn  { display: none; }
     }
   </style>
 </head>
 <body>
   <div class="receipt">
     <div class="title">AIR QUALITY RESULTS</div>
+    <div class="subtitle">Helmet Filter Report</div>
     <div class="timestamp">${dateStr} &nbsp; ${timeStr}</div>
     <div class="divider"></div>
-    <div class="section-label">BEFORE</div>
+    <div class="section-label">&#9650; BEFORE</div>
     <div class="row"><span>PM1.0</span><span>${pm1b} ug/m&sup3;</span></div>
     <div class="row"><span>PM2.5</span><span>${pm25b} ug/m&sup3;</span></div>
-    <div class="row"><span>PM10</span><span>${pm10b} ug/m&sup3;</span></div>
+    <div class="row"><span>PM10 </span><span>${pm10b} ug/m&sup3;</span></div>
     <div class="divider"></div>
-    <div class="section-label">AFTER</div>
+    <div class="section-label">&#9660; AFTER</div>
     <div class="row"><span>PM1.0</span><span>${pm1a} ug/m&sup3;</span></div>
     <div class="row"><span>PM2.5</span><span>${pm25a} ug/m&sup3;</span></div>
-    <div class="row"><span>PM10</span><span>${pm10a} ug/m&sup3;</span></div>
+    <div class="row"><span>PM10 </span><span>${pm10a} ug/m&sup3;</span></div>
     <div class="divider"></div>
   </div>
   <button class="print-btn" onclick="window.print()">Print</button>
