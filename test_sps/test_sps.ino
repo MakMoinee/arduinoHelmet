@@ -11,8 +11,8 @@
 // ---------------------------------------------------------------------------
 // Wi-Fi credentials
 // ---------------------------------------------------------------------------
-const char* WIFI_SSID     = "BWifi4G";
-const char* WIFI_PASSWORD = "BorbonFamily@2021";
+const char* WIFI_SSID     = "kennen";
+const char* WIFI_PASSWORD = "kennen0318";
 
 // ---------------------------------------------------------------------------
 // Hardware
