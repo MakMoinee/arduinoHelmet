@@ -1,6 +1,6 @@
 var express = require('express');
 var router = express.Router();
-var { exec } = require('child_process');
+var { exec, spawn } = require('child_process');
 var fs = require('fs');
 var path = require('path');
 var os = require('os');
@@ -47,17 +47,23 @@ router.get('/print', function(req, res, next) {
     ''
   ].join('\n');
 
-  // Write content to a temp file then print it (avoids multiline escaping issues)
+  // Write content to a temp file then print via spawn (no shell escaping issues)
   var tmpFile = path.join(os.tmpdir(), 'print_' + Date.now() + '.txt');
   fs.writeFileSync(tmpFile, lines, 'utf8');
 
-  var psCmd = 'powershell.exe -Command "Get-Content \'' + tmpFile.replace(/\\/g, '\\\\') + '\' | Out-Printer -Name \'PT-210\'"';
+  var ps = spawn('powershell.exe', [
+    '-Command',
+    "Get-Content '" + tmpFile + "' | Out-Printer -Name 'POS58'"
+  ]);
 
-  exec(psCmd, function(err, stdout, stderr) {
+  var stderr = '';
+  ps.stderr.on('data', function(d){ stderr += d.toString(); });
+
+  ps.on('close', function(code) {
     fs.unlink(tmpFile, function(){});  // clean up temp file regardless
-    if (err) {
-      console.error('Print error:', stderr || err.message);
-      return res.status(500).json({ error: 'Print failed', detail: stderr || err.message });
+    if (code !== 0) {
+      console.error('Print error:', stderr);
+      return res.status(500).json({ error: 'Print failed', detail: stderr });
     }
     res.json({ success: true, message: 'Sent to PT-210' });
   });
